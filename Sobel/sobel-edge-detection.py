@@ -1,124 +1,113 @@
-#!/usr/bin/env python3
-import sys
-import math
-import time
+# detect_sobel_ultra_optimized.py
 import os
+import time
 from PIL import Image
+from concurrent.futures import ProcessPoolExecutor
 
-def separable_sobel(data, width, height):
-    w, h = width, height
-    size = w * h
-    Gx1 = [0] * size
-    Gy1 = [0] * size
-
-    # First pass: horizontal (Gx1) and vertical (Gy1) derivatives
-    for y in range(1, h - 1):
-        row = y * w
-        up   = row - w
-        down = row + w
-        for x in range(1, w - 1):
-            idx = row + x
-            Gx1[idx] = data[idx - 1] - data[idx + 1]
-            Gy1[idx] = data[up + x] - data[down + x]
-
-    # Second pass: smoothing to get final Gx, Gy
-    Gx = [0] * size
-    Gy = [0] * size
-    for y in range(1, h - 1):
-        row = y * w
-        up   = row - w
-        down = row + w
-        # Vertical smoothing for Gx
-        for x in range(w):
-            i = row + x
-            Gx[i] = Gx1[up + x] + 2 * Gx1[i] + Gx1[down + x]
-        # Horizontal smoothing for Gy
-        for x in range(1, w - 1):
-            i = row + x
-            Gy[i] = Gy1[i - 1] + 2 * Gy1[i] + Gy1[i + 1]
-
-    return Gx, Gy
-
-
-def sobel_edge_detection(input_path, output_path, threshold=None):
-    # Load and gray-convert
+def read_image_with_pillow(filename):
     try:
-        img = Image.open(input_path).convert('L')
-    except IOError:
-        print(f"Não foi possível abrir ou ler o arquivo: {input_path}. Ignorando.")
-        return
+        with Image.open(filename) as img:
+            grayscale_img = img.convert('L')
+            width, height = grayscale_img.size
+            pixel_data = list(grayscale_img.getdata())
+            image_matrix = [pixel_data[i * width:(i + 1) * width] for i in range(height)]
+            return image_matrix, width, height
+    except Exception as e:
+        print(f"Erro ao ler o arquivo {filename}: {e}")
+        return None, 0, 0
 
-    width, height = img.size
-    data = list(img.getdata())
+def write_image_with_pillow(filename, image_matrix, width, height):
+    try:
+        img = Image.new('L', (width, height))
+        pixel_data = [pixel for row in image_matrix for pixel in row]
+        img.putdata(pixel_data)
+        img.save(filename)
+    except Exception as e:
+        print(f"Erro ao salvar o arquivo {filename}: {e}")
 
-    # --- Start timing core algorithm ---
-    t0 = time.perf_counter()
-    Gx, Gy = separable_sobel(data, width, height)
+def process_chunk(args):
+    image, width, start_row, end_row = args
+    sobel_chunk = [[0] * width for _ in range(end_row - start_row)]
+    
+    for r in range(max(1, start_row), min(end_row, len(image)-1)):
+        for c in range(1, width-1):
+            # Cálculo direto de Gx e Gy
+            gx = (image[r-1][c+1] + 2*image[r][c+1] + image[r+1][c+1]) - \
+                 (image[r-1][c-1] + 2*image[r][c-1] + image[r+1][c-1])
+            
+            gy = (image[r-1][c-1] + 2*image[r-1][c] + image[r-1][c+1]) - \
+                 (image[r+1][c-1] + 2*image[r+1][c] + image[r+1][c+1])
+            
+            magnitude = abs(gx) + abs(gy)
+            sobel_chunk[r - start_row][c] = magnitude
+            
+    return start_row, end_row, sobel_chunk
 
-    size = width * height
-    mag2 = [0] * size
-    max_mag2 = 0.0
-    # Gradient magnitude squared + find max
-    for i in range(size):
-        m = Gx[i] * Gx[i] + Gy[i] * Gy[i]
-        mag2[i] = m
-        if m > max_mag2:
-            max_mag2 = m
+def apply_sobel_filter_ultra_optimized(image, width, height):
+    num_workers = os.cpu_count() or 4
+    chunk_size = (height + num_workers - 1) // num_workers
+    chunks = []
+    
+    for i in range(num_workers):
+        start_row = i * chunk_size
+        end_row = min((i + 1) * chunk_size, height)
+        chunks.append((image, width, start_row, end_row))
+    
+    sobel_image = [[0] * width for _ in range(height)]
+    
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        results = executor.map(process_chunk, chunks)
+        
+        for start_row, end_row, chunk_data in results:
+            for r in range(start_row, end_row):
+                sobel_image[r] = chunk_data[r - start_row]
+    
+    # Normalização
+    max_magnitude = max(max(row) for row in sobel_image)
+    if max_magnitude > 0:
+        for r in range(height):
+            for c in range(width):
+                sobel_image[r][c] = int((sobel_image[r][c] / max_magnitude) * 255)
+    
+    return sobel_image
 
-    max_mag = math.sqrt(max_mag2) if max_mag2 > 0 else 1.0
-    scale = 255.0 / max_mag
+if __name__ == "__main__":
+    start_time = time.time()
+    INPUT_FOLDER = "../input"
+    SOBEL_OUTPUT_FOLDER = "sobel_edge_detection_output_ultra_optimized"
+    os.makedirs(SOBEL_OUTPUT_FOLDER, exist_ok=True)
 
-    edge = [0] * size
-    if threshold is not None:
-        for i, m in enumerate(mag2):
-            v = int(math.sqrt(m) * scale)
-            edge[i] = 255 if v >= threshold else 0
+    print("="*50)
+    print("SCRIPT ULTRA OTIMIZADO: DETECÇÃO DE BORDAS COM SOBEL")
+    print(f"Pasta de Entrada: '{INPUT_FOLDER}'")
+    print(f"Pasta de Saída: '{SOBEL_OUTPUT_FOLDER}'")
+    print("="*50)
+
+    if not os.path.isdir(INPUT_FOLDER):
+        print(f"\nERRO: A pasta de entrada '{INPUT_FOLDER}' não foi encontrada.")
+        print("Crie a pasta e coloque suas imagens nela.")
     else:
-        for i, m in enumerate(mag2):
-            edge[i] = int(math.sqrt(m) * scale)
-
-    t1 = time.perf_counter()
-    print(f"Tempo de processamento para {os.path.basename(input_path)}: {t1 - t0:.3f} segundos")
-
-    # Save output
-    out_img = Image.new('L', (width, height))
-    out_img.putdata(edge)
-    out_img.save(output_path)
-    print(f"Mapa de arestas Sobel salvo em {output_path}")
-
-
-def print_usage():
-    print("Uso: python seu_script.py <pasta_de_entrada> <pasta_de_saida> [limiar]")
-    print("  limiar: inteiro opcional de 0 a 255 para binarizar as arestas")
-
-
-if __name__ == '__main__':
-    if len(sys.argv) < 3 or len(sys.argv) > 4:
-        print_usage()
-        sys.exit(1)
-
-    input_folder = sys.argv[1]
-    output_folder = sys.argv[2]
-    thr = int(sys.argv[3]) if len(sys.argv) == 4 else None
-
-    # Verifica se a pasta de entrada existe
-    if not os.path.isdir(input_folder):
-        print(f"Erro: A pasta de entrada '{input_folder}' não foi encontrada.")
-        sys.exit(1)
-
-    # Cria a pasta de saída se ela não existir
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-        print(f"Pasta de saída '{output_folder}' criada.")
-
-    # Lista de extensões de imagem válidas
-    valid_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff')
-
-    # Itera sobre todos os arquivos na pasta de entrada
-    for filename in os.listdir(input_folder):
-        if filename.lower().endswith(valid_extensions):
-            input_path = os.path.join(input_folder, filename)
-            output_path = os.path.join(output_folder, filename)
-            sobel_edge_detection(input_path, output_path, thr)
-
-    print("\nProcessamento de todas as imagens concluído.")
+        files_to_process = os.listdir(INPUT_FOLDER)
+        num_processed = 0
+        for filename in files_to_process:
+            if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                input_path = os.path.join(INPUT_FOLDER, filename)
+                print(f"\n--- Processando: {filename} ---")
+                
+                original_image, width, height = read_image_with_pillow(input_path)
+                if original_image:
+                    sobel_image = apply_sobel_filter_ultra_optimized(original_image, width, height)
+                    
+                    base_name, _ = os.path.splitext(filename)
+                    output_path = os.path.join(SOBEL_OUTPUT_FOLDER, f"sobel_{base_name}.png")
+                    
+                    write_image_with_pillow(output_path, sobel_image, width, height)
+                    print(f"Resultado do Sobel salvo em: {output_path}")
+                    num_processed += 1
+        
+        end_time = time.time()
+        print("\n" + "="*50)
+        print("Detecção de bordas concluída!")
+        print(f"Total de imagens processadas: {num_processed}")
+        print(f"Tempo de execução: {end_time - start_time:.2f} segundos.")
+        print("="*50)
